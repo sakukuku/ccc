@@ -4,13 +4,12 @@ import { customElement, property, state } from "lit/decorators.js";
 import { CLOSE_SVG } from "../assets/close.svg";
 import { OKX_SVG } from "../assets/okx.svg";
 import { UNI_SAT_SVG } from "../assets/uni-sat.svg";
-import { CloseEvent, SignerChangedEvent, StatusChangedEvent } from "../events";
+import { WillUpdateEvent } from "../events";
 import {
   generateConnectingScene,
   generateSignersScene,
   generateWalletsScene,
 } from "../scenes";
-import { ConnectorStatus } from "../status";
 import { WalletWithSigners } from "../types";
 
 @customElement("ccc-connector")
@@ -20,31 +19,147 @@ export class WebComponentConnector extends LitElement {
 
   private resetListeners: (() => void)[] = [];
 
-  @property()
+  @state()
   public isOpen: boolean = false;
+  public setIsOpen(isOpen: boolean) {
+    this.isOpen = isOpen;
+  }
 
   @property()
   public client: ccc.Client = new ccc.ClientPublicTestnet();
-  @property()
-  public wallet?: ccc.Wallet;
-  @property()
+  public setClient(client: ccc.Client) {
+    this.client = client;
+  }
+
+  @state()
+  private walletName?: string;
+  @state()
+  private signerType?: ccc.SignerType;
+  @state()
+  private selectedWallet?: WalletWithSigners;
+  private updateWallet() {
+    this.selectedWallet = this.wallets.find(
+      (wallet) => this.walletName === wallet.name,
+    );
+  }
+  @state()
+  private selectedSigner?: ccc.SignerInfo;
+  private updateSigner() {
+    this.selectedSigner = this.selectedWallet?.signers.find(
+      ({ type }) => type === this.signerType,
+    );
+  }
+  @state()
+  public wallet?: WalletWithSigners;
+  @state()
   public signer?: ccc.SignerInfo;
-  @property()
-  public status: ConnectorStatus = ConnectorStatus.SelectingSigner;
+  private canConnect = false;
+  private prepareSigner() {
+    (async () => {
+      if (!this.selectedSigner) {
+        this.wallet = undefined;
+        this.signer = undefined;
+        return;
+      }
+
+      if (!(await this.selectedSigner.signer.isConnected())) {
+        if (!this.canConnect) {
+          this.disconnect();
+          return;
+        }
+        await this.selectedSigner.signer.connect();
+      }
+
+      this.saveConnection();
+      this.wallet = this.selectedWallet;
+      this.signer = this.selectedSigner;
+      this.closedHandler();
+    })();
+  }
+
+  public disconnect() {
+    this.walletName = undefined;
+    this.wallet = undefined;
+    this.signerType = undefined;
+    this.signer = undefined;
+    this.saveConnection();
+  }
+
+  private loadConnection() {
+    const {
+      signerType,
+      walletName,
+    }: { signerType?: ccc.SignerType; walletName?: string } = JSON.parse(
+      window.localStorage.getItem("ccc-connection-info") ?? "{}",
+    );
+
+    this.signerType = signerType;
+    this.walletName = walletName;
+  }
+
+  private saveConnection() {
+    window.localStorage.setItem(
+      "ccc-connection-info",
+      JSON.stringify({
+        signerType: this.signerType,
+        walletName: this.walletName,
+      }),
+    );
+  }
 
   connectedCallback(): void {
     super.connectedCallback();
-    this.refreshSigners();
+    this.loadConnection();
+    this.reloadSigners();
   }
 
-  willUpdate(changedProperties: PropertyValues<this>): void {
-    if (changedProperties.get("client")) {
-      this.reset();
-      this.refreshSigners();
+  willUpdate(changedProperties: PropertyValues): void {
+    if (changedProperties.has("client")) {
+      this.reloadSigners();
     }
+    if (
+      changedProperties.has("walletName") ||
+      changedProperties.has("wallets")
+    ) {
+      this.updateWallet();
+    }
+    if (
+      changedProperties.has("signerType") ||
+      changedProperties.has("selectedWallet")
+    ) {
+      this.updateSigner();
+    }
+    if (changedProperties.has("selectedSigner")) {
+      this.prepareSigner();
+    }
+
+    this.dispatchEvent(new WillUpdateEvent());
   }
 
-  refreshSigners() {
+  private reloadSigners() {
+    this.wallets = [];
+
+    (async () => {
+      if (!this.selectedSigner) {
+        return;
+      }
+
+      const newSigner = await this.selectedSigner.signer.replaceClient(
+        this.client,
+      );
+      if (newSigner) {
+        this.selectedSigner = {
+          ...this.selectedSigner,
+          signer: newSigner,
+        };
+      } else {
+        this.disconnect();
+      }
+    })();
+
+    this.resetListeners.forEach((listener) => listener());
+    this.resetListeners = [];
+
     const uniSatSigner = ccc.UniSat.getUniSatSigner(this.client);
     if (uniSatSigner) {
       this.addSigner("UniSat", UNI_SAT_SVG, ccc.SignerType.BTC, uniSatSigner);
@@ -73,74 +188,55 @@ export class WebComponentConnector extends LitElement {
     );
   }
 
-  reset() {
-    this.wallets = [];
-
-    (async () => {
-      if (!this.signer) {
-        return;
-      }
-
-      const newSigner = await this.signer.signer.replaceClient(this.client);
-      if (newSigner) {
-        this.onSignerSelected(this.wallet, {
-          ...this.signer,
-          signer: newSigner,
-        });
-      } else {
-        this.onReset();
-      }
-    })();
-
-    const resetListeners = this.resetListeners;
-    this.resetListeners = [];
-    resetListeners.forEach((listener) => listener());
-  }
-
-  addSigner(
+  private addSigner(
     name: string,
     icon: string,
     type: ccc.SignerType,
     signer: ccc.Signer,
   ) {
-    const wallet = this.wallets.find((wallet) => wallet.name === name);
-    if (wallet) {
-      wallet.signers.push({ type, signer });
-      this.wallets = [...this.wallets];
-    } else {
-      this.wallets = [
-        ...this.wallets,
-        {
-          name,
-          icon,
-          signers: [{ type, signer }],
-        },
-      ];
+    let updated = false;
+    const wallets = this.wallets.map((wallet) => {
+      if (wallet.name !== name) {
+        return wallet;
+      }
+
+      updated = true;
+      return {
+        ...wallet,
+        signers: [...wallet.signers, { type, signer }],
+      };
+    });
+
+    if (!updated) {
+      wallets.push({
+        name,
+        icon,
+        signers: [{ type, signer }],
+      });
     }
+
+    this.wallets = wallets;
   }
 
   render() {
     const [title, body] = (() => {
-      const wallet = ccc.apply(
-        (wallet: ccc.Wallet) =>
-          this.wallets.find((w) => w.name === wallet.name),
-        this.wallet,
-      );
-
-      if (!wallet) {
+      if (!this.selectedWallet) {
         return generateWalletsScene(
           this.wallets,
-          this.onWalletSelected,
-          this.onSignerSelected,
+          this.signerSelectedHandler,
+          this.signerSelectedHandler,
         );
       }
-      if (!this.signer) {
-        return generateSignersScene(wallet, this.onSignerSelected);
+      if (!this.selectedSigner) {
+        return generateSignersScene(
+          this.selectedWallet,
+          this.signerSelectedHandler,
+        );
       }
       return generateConnectingScene(
-        wallet,
-        this.signer,
-        this.onSignerSelected,
+        this.selectedWallet,
+        this.selectedSigner,
+        this.signerSelectedHandler,
       );
     })();
 
@@ -161,7 +257,7 @@ export class WebComponentConnector extends LitElement {
         class="background"
         @click=${(event: Event) => {
           if (event.target === event.currentTarget) {
-            this.onClose();
+            this.closedHandler();
           }
         }}
       >
@@ -169,44 +265,27 @@ export class WebComponentConnector extends LitElement {
           <div class="header text-bold fs-big">
             <div class="back"></div>
             ${title}
-            <img class="close" src=${CLOSE_SVG} @click=${this.onClose} />
+            <img class="close" src=${CLOSE_SVG} @click=${this.closedHandler} />
           </div>
           <div class="body">${body}</div>
         </div>
       </div>`;
   }
 
-  private onClose = () => {
-    if (this.status === ConnectorStatus.SelectingSigner) {
-      this.onReset();
+  private closedHandler = () => {
+    if (this.signer === undefined) {
+      this.disconnect();
     }
-    this.dispatchEvent(new CloseEvent());
+    this.isOpen = false;
   };
 
-  private onReset = () => {
-    this.dispatchEvent(new StatusChangedEvent(ConnectorStatus.SelectingSigner));
-    this.dispatchEvent(new SignerChangedEvent());
-  };
-
-  private onWalletSelected = (wallet: ccc.Wallet) => {
-    this.dispatchEvent(new SignerChangedEvent(wallet, this.signer));
-  };
-
-  private onSignerSelected = (
-    wallet: ccc.Wallet | undefined,
-    signer: ccc.SignerInfo,
+  private signerSelectedHandler = (
+    wallet?: ccc.Wallet,
+    signer?: ccc.SignerInfo,
   ) => {
-    (async () => {
-      this.dispatchEvent(new SignerChangedEvent(wallet, signer));
-
-      if (!(await signer.signer.isConnected())) {
-        this.dispatchEvent(new StatusChangedEvent(ConnectorStatus.Connecting));
-        await signer.signer.connect();
-      }
-
-      this.dispatchEvent(new StatusChangedEvent(ConnectorStatus.Idle));
-      this.dispatchEvent(new CloseEvent());
-    })();
+    this.walletName = wallet?.name;
+    this.signerType = signer?.type;
+    this.canConnect = true;
   };
 
   static styles = css`

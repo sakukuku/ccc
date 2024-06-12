@@ -1,5 +1,5 @@
-import { ccc } from "@ckb-ccc/connector";
-import React, { createContext, useState } from "react";
+import { WebComponentConnector, ccc } from "@ckb-ccc/connector";
+import React, { createContext, useCallback, useMemo, useState } from "react";
 import { Connector } from "../components";
 
 const CCC_CONTEXT = createContext<
@@ -10,7 +10,6 @@ const CCC_CONTEXT = createContext<
       client: ccc.Client;
       wallet?: ccc.Wallet;
       signerInfo?: ccc.SignerInfo;
-      status: ccc.ConnectorStatus;
     }
   | undefined
 >(undefined);
@@ -22,55 +21,38 @@ export function Provider({
   children: React.ReactNode;
   connectorProps?: React.HTMLAttributes<{}>;
 }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const [client, setClient] = useState<ccc.Client>(
-    () => new ccc.ClientPublicTestnet(),
+  const [ref, setRef] = useState<WebComponentConnector | null>(null);
+  const [_, setFlag] = useState(0);
+
+  const client = useMemo(
+    () => ref?.client ?? new ccc.ClientPublicTestnet(),
+    [ref?.client],
   );
-  const [wallet, setWallet] = useState<ccc.Wallet | undefined>();
-  const [signerInfo, setSignerInfo] = useState<ccc.SignerInfo | undefined>();
-  const [status, setStatus] = useState<ccc.ConnectorStatus>(
-    ccc.ConnectorStatus.SelectingSigner,
+  const open = useCallback(() => ref?.setIsOpen(true), [ref, ref?.setIsOpen]);
+  const disconnect = useMemo(
+    () => ref?.disconnect.bind(ref) ?? (() => {}),
+    [ref, ref?.disconnect],
+  );
+  const setClient = useMemo(
+    () => ref?.setClient.bind(ref) ?? (() => {}),
+    [ref, ref?.setClient],
   );
 
   return (
     <CCC_CONTEXT.Provider
       value={{
-        open: () => setIsOpen(true),
-        disconnect: () => {
-          setWallet(undefined);
-          setSignerInfo(undefined);
-          setStatus(ccc.ConnectorStatus.SelectingSigner);
-        },
+        open,
+        disconnect,
         setClient,
 
         client,
-        ...([
-          ccc.ConnectorStatus.SelectingSigner,
-          ccc.ConnectorStatus.Connecting,
-        ].includes(status)
-          ? {
-              wallet: undefined,
-              signerInfo: undefined,
-            }
-          : {
-              wallet,
-              signerInfo,
-            }),
-        status,
+        wallet: ref?.wallet,
+        signerInfo: ref?.signer,
       }}
     >
       <Connector
-        isOpen={isOpen}
-        client={client}
-        wallet={wallet}
-        signer={signerInfo}
-        status={status}
-        onClose={() => setIsOpen(false)}
-        onSignerChanged={({ wallet, signerInfo }) => {
-          setWallet(wallet);
-          setSignerInfo(signerInfo);
-        }}
-        onStatusChanged={({ status }) => setStatus(status)}
+        ref={setRef}
+        onWillUpdate={() => setFlag((f) => f + 1)}
         {...{
           ...connectorProps,
           style: {

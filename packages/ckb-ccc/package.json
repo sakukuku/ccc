@@ -1,6 +1,6 @@
 {
   "name": "ckb-ccc",
-  "version": "0.0.4-alpha.13",
+  "version": "0.0.4",
   "description": "Common Chains Connector",
   "author": "Hanssen0 <hanssen0@hanssen0.com>",
   "license": "MIT",
@@ -10,9 +10,10 @@
     "type": "git",
     "url": "git://github.com/ckb-ecofund/ccc.git"
   },
-  "main": "dist/index.js",
+  "main": "dist.commonjs/index.js",
+  "module": "dist/index.js",
   "scripts": {
-    "build": "rimraf ./dist && tsc",
+    "build": "rimraf ./dist && rimraf ./dist.commonjs && tsc && tsc --project tsconfig.commonjs.json",
     "lint": "eslint",
     "format": "prettier --write . && eslint --fix"
   },
